@@ -415,30 +415,18 @@ def fetch_yahoo_quotes(symbols: list[str]) -> dict[str, Quote]:
     return out
 
 
-def fetch_stocks(symbols: list[str]) -> list[Quote]:
-    """Fetch stock quotes from Cloudflare Worker."""
-    if not STOCK_WORKER_URL:
-        return []
-    
-    # Ensure we use the /quote endpoint
-    url = f"{STOCK_WORKER_URL.rstrip('/')}/quote?symbols={','.join(symbols)}"
-    try:
-        data = _get_json(url, timeout=20)
-        out: list[Quote] = []
-        for sym in symbols:
-            q = data.get(sym)
-            if q:
-                out.append(Quote(
-                    name=q.get("name", sym),
-                    symbol=sym,
-                    price=q.get("price"),
-                    change=q.get("change"),
-                    change_pct=q.get("change_pct")
-                ))
-        return out
-    except Exception as e:
-        log.warning("Stock fetch failed: %s", e)
-        return []
+def fetch_stocks() -> tuple[list[Quote], list[Quote]]:
+    """Returns (indexes, tickers)."""
+    all_pairs = STOCK_INDEXES + STOCK_TICKERS
+    sym_to_name = {s: n for n, s in all_pairs}
+    quotes = fetch_yahoo_quotes([s for _, s in all_pairs])
+    # Re-map to original display names
+    for sym, q in quotes.items():
+        if sym in sym_to_name:
+            q.name = sym_to_name[sym]
+    indexes = [quotes[s] for _, s in STOCK_INDEXES if s in quotes]
+    tickers = [quotes[s] for _, s in STOCK_TICKERS if s in quotes]
+    return indexes, tickers
 
 
 def fetch_crypto() -> list[Quote]:
