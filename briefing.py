@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-Daily Briefing v2 — static HTML generator for GitHub Pages.
+Daily Briefing v3 — static HTML generator for GitHub Pages.
 
 Sources (no API keys required):
   - News RSS (politically diverse mix)
   - GDELT 2.0 (global conflict events)
-  - ReliefWeb (UN humanitarian reports)
-  - Hacker News top stories (tech)
-  - Reddit r/worldnews top
+  - Hacker News top stories
   - Yahoo Finance v8 (stocks + indexes)
   - CoinGecko (crypto prices)
   - NOAA Space Weather (Kp + alerts)
   - Open-Meteo (weather + air quality)
   - Sunrise-Sunset.org
-  - NOAA Tides & Currents (Edmonds/Seattle, station 9447130)
+  - NOAA Tides & Currents
+  - 🚀 Space:
+      * NASA APOD (image of the day)
+      * Spaceflight News API (latest articles)
+      * Open Notify (ISS position + crew)
+      * The Space Devs (upcoming launches)
+      * NASA NeoWs (near-Earth asteroids)
 
 Writes: index.html
 """
@@ -51,10 +55,9 @@ GLOBAL_FEEDS = [
     ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
     ("NPR News", "https://feeds.npr.org/1001/rss.xml"),
     ("Guardian World", "https://www.theguardian.com/world/rss"),
-    # Center / wire
+    # Center / international
     ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
     ("Deutsche Welle", "https://rss.dw.com/rdf/rss-en-world"),
-    ("AP Top News", "https://feeds.apnews.com/apf-topnews"),  # alt AP feed
     # Business / center-right of mainstream
     ("WSJ World", "https://feeds.content.dowjones.io/public/rss/RSSWorldNews"),
     ("Washington Examiner", "https://www.washingtonexaminer.com/section/news/feed"),
@@ -186,29 +189,6 @@ def fetch_gdelt() -> list[Article]:
         return []
 
 
-def fetch_reliefweb() -> list[Article]:
-    params = {
-        "appname": "daily-briefing@drawmyoshi.com",
-        "profile": "list",
-        "preset": "latest",
-        "limit": "8",
-    }
-    url = f"https://api.reliefweb.int/v2/reports?{urlencode(params)}"
-    try:
-        data = _get_json(url, timeout=20)
-        out: list[Article] = []
-        for item in data.get("data", []):
-            f = item.get("fields", {})
-            title = (f.get("title") or "").strip()
-            link = f.get("url") or "#"
-            if title:
-                out.append(Article(source="ReliefWeb", title=title, url=link))
-        return out
-    except Exception as e:
-        log.warning("ReliefWeb failed: %s", e)
-        return []
-
-
 def fetch_hackernews() -> list[Article]:
     """HN top stories — pulls top 10 IDs then their items."""
     try:
@@ -231,34 +211,156 @@ def fetch_hackernews() -> list[Article]:
         return []
 
 
-def fetch_reddit_worldnews() -> list[Article]:
-    """r/worldnews top from past 24h.
-    Reddit requires a specific UA format: 'platform:appname:version (by /u/user)'.
-    Generic UAs get 403'd.
-    """
-    url = "https://www.reddit.com/r/worldnews/top.json?t=day&limit=10"
-    reddit_ua = "web:daily-briefing:v2.0 (github actions, personal use)"
+# --- SPACE ----------------------------------------------------------------
+# All free, no key required (NASA's DEMO_KEY works at low traffic — twice/day is fine).
+# Drop in a personal NASA key from https://api.nasa.gov/ if you want headroom.
+
+NASA_KEY = "DEMO_KEY"  # 30 req/hr GLOBAL across all DEMO_KEY users; fine for our 2x/day
+
+
+def fetch_apod() -> dict | None:
+    """NASA Astronomy Picture of the Day. Returns dict or None."""
     try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": reddit_ua})
-        r.raise_for_status()
-        data = r.json()
+        url = f"https://api.nasa.gov/planetary/apod?api_key={NASA_KEY}"
+        d = _get_json(url, timeout=15)
+        return {
+            "title": d.get("title", ""),
+            "date": d.get("date", ""),
+            "url": d.get("url", ""),
+            "hdurl": d.get("hdurl", ""),
+            "media_type": d.get("media_type", ""),  # "image" or "video"
+            "explanation": d.get("explanation", ""),
+            "copyright": d.get("copyright", ""),
+        }
+    except Exception as e:
+        log.warning("APOD failed: %s", e)
+        return None
+
+
+def fetch_spaceflight_news() -> list[Article]:
+    """Spaceflight News API — aggregates SpaceNews, NASASpaceflight, ESA, etc."""
+    url = "https://api.spaceflightnewsapi.net/v4/articles/?limit=10&ordering=-published_at"
+    try:
+        d = _get_json(url, timeout=15)
         out: list[Article] = []
-        for child in data.get("data", {}).get("children", []):
-            d = child.get("data", {})
-            title = (d.get("title") or "").strip()
-            permalink = d.get("permalink") or ""
-            if title and permalink:
-                out.append(
-                    Article(
-                        source=f"r/worldnews ({d.get('score', 0)}↑)",
-                        title=title,
-                        url=f"https://reddit.com{permalink}",
-                    )
-                )
+        for a in d.get("results", [])[:10]:
+            title = (a.get("title") or "").strip()
+            link = a.get("url") or "#"
+            site = a.get("news_site") or "Space"
+            if title:
+                out.append(Article(source=site, title=title, url=link))
         return out
     except Exception as e:
-        log.warning("Reddit failed: %s", e)
+        log.warning("Spaceflight News failed: %s", e)
         return []
+
+
+def fetch_iss() -> dict:
+    """ISS current location + crew. Returns dict with location, crew_count, crew names."""
+    out = {"location": None, "crew_count": None, "crew_names": []}
+    try:
+        # Position
+        pos = _get_json("http://api.open-notify.org/iss-now.json", timeout=10)
+        if pos.get("message") == "success":
+            lat = float(pos["iss_position"]["latitude"])
+            lon = float(pos["iss_position"]["longitude"])
+            # Reverse-geocode to a human-readable location
+            try:
+                geo = _get_json(
+                    f"https://api.bigdatacloud.net/data/reverse-geocode-client"
+                    f"?latitude={lat}&longitude={lon}&localityLanguage=en",
+                    timeout=10,
+                )
+                country = geo.get("countryName")
+                locality = geo.get("locality")
+                # If over an ocean, locality has the ocean name; country empty
+                if country:
+                    place = f"{locality}, {country}" if locality else country
+                else:
+                    place = locality or "open ocean"
+                out["location"] = f"{place} ({lat:.1f}°, {lon:.1f}°)"
+            except Exception:
+                out["location"] = f"{lat:.1f}°N, {lon:.1f}°E"
+    except Exception as e:
+        log.warning("ISS position failed: %s", e)
+
+    try:
+        # Crew (filters to ISS only since open-notify also lists Tiangong)
+        crew = _get_json("http://api.open-notify.org/astros.json", timeout=10)
+        iss_people = [p["name"] for p in crew.get("people", []) if p.get("craft") == "ISS"]
+        out["crew_count"] = len(iss_people)
+        out["crew_names"] = iss_people
+    except Exception as e:
+        log.warning("ISS crew failed: %s", e)
+
+    return out
+
+
+def fetch_launches() -> list[dict]:
+    """Upcoming rocket launches via The Space Devs Launch Library 2."""
+    url = "https://ll.thespacedevs.com/2.3.0/launches/upcoming/?limit=5&mode=list"
+    try:
+        d = _get_json(url, timeout=20)
+        out: list[dict] = []
+        for l in d.get("results", [])[:5]:
+            net_iso = l.get("net", "")  # "2026-04-28T00:52:00Z"
+            try:
+                net_dt = datetime.fromisoformat(net_iso.replace("Z", "+00:00"))
+                net_local = net_dt.astimezone(TZ).strftime("%a %b %-d, %-I:%M %p %Z")
+            except Exception:
+                net_local = net_iso[:16]
+            out.append({
+                "name": l.get("name", "?"),
+                "when": net_local,
+                "status": (l.get("status") or {}).get("name", ""),
+            })
+        return out
+    except Exception as e:
+        log.warning("Launches failed: %s", e)
+        return []
+
+
+def fetch_asteroids() -> list[dict]:
+    """Today's near-Earth asteroid close passes from NASA NeoWs."""
+    today = datetime.now(TZ).date().isoformat()
+    url = (
+        f"https://api.nasa.gov/neo/rest/v1/feed?start_date={today}&end_date={today}"
+        f"&api_key={NASA_KEY}"
+    )
+    try:
+        d = _get_json(url, timeout=20)
+        neos = d.get("near_earth_objects", {}).get(today, [])
+        out: list[dict] = []
+        for n in neos:
+            ca = (n.get("close_approach_data") or [{}])[0]
+            miss_lunar = ca.get("miss_distance", {}).get("lunar")
+            try:
+                miss_lunar_f = float(miss_lunar) if miss_lunar is not None else None
+            except (TypeError, ValueError):
+                miss_lunar_f = None
+            diam = n.get("estimated_diameter", {}).get("meters", {})
+            d_min = diam.get("estimated_diameter_min")
+            d_max = diam.get("estimated_diameter_max")
+            try:
+                d_avg = (float(d_min) + float(d_max)) / 2 if d_min and d_max else None
+            except (TypeError, ValueError):
+                d_avg = None
+            time_utc = ca.get("close_approach_date_full", "")[-5:]  # "HH:MM"
+            out.append({
+                "name": n.get("name", "?"),
+                "diameter_m": d_avg,
+                "miss_lunar": miss_lunar_f,
+                "time_utc": time_utc,
+                "hazardous": n.get("is_potentially_hazardous_asteroid", False),
+                "url": n.get("nasa_jpl_url", "#"),
+            })
+        # Sort by closest miss distance
+        out.sort(key=lambda x: x["miss_lunar"] if x["miss_lunar"] is not None else 9999)
+        return out[:5]
+    except Exception as e:
+        log.warning("Asteroids failed: %s", e)
+        return []
+
 
 
 # --- MARKETS --------------------------------------------------------------
@@ -559,13 +661,102 @@ def render_tides(tides: list[TideEvent]) -> str:
     return f"<ul>{''.join(items)}</ul>"
 
 
+def render_apod(apod: dict | None) -> str:
+    if not apod:
+        return '<p class="empty">APOD unavailable.</p>'
+    title = html.escape(apod.get("title", ""))
+    date = html.escape(apod.get("date", ""))
+    url = html.escape(apod.get("url", ""))
+    hdurl = html.escape(apod.get("hdurl") or apod.get("url", ""))
+    media = apod.get("media_type", "")
+    explain = html.escape((apod.get("explanation", "") or "")[:400])
+    if explain and len(apod.get("explanation", "")) > 400:
+        explain += "…"
+    copyright_ = apod.get("copyright")
+    credit = f' · © {html.escape(copyright_.strip())}' if copyright_ else ""
+
+    if media == "image":
+        return f"""
+<a href="{hdurl}" target="_blank" rel="noopener">
+  <img class="apod-img" src="{url}" alt="{title}" loading="lazy">
+</a>
+<p class="apod-cap"><strong>{title}</strong>
+  <span class="muted">· {date}{credit}</span>
+</p>
+<p class="apod-text">{explain}</p>
+"""
+    elif media == "video":
+        return f"""
+<p class="apod-cap"><strong>{title}</strong>
+  <span class="muted">· {date} · video</span>
+</p>
+<p class="apod-text">{explain}</p>
+<p><a href="{url}" target="_blank" rel="noopener">▶ Watch on NASA →</a></p>
+"""
+    else:
+        return f'<p class="empty">APOD format not supported.</p>'
+
+
+def render_iss(iss: dict) -> str:
+    loc = iss.get("location") or "Position unavailable"
+    crew_count = iss.get("crew_count")
+    crew_names = iss.get("crew_names") or []
+    crew_str = (
+        f"<strong>{crew_count} crew aboard</strong>: " + ", ".join(html.escape(n) for n in crew_names)
+        if crew_count else "<em>Crew info unavailable</em>"
+    )
+    return f"""
+<p class="kv"><strong>Currently over:</strong> {html.escape(loc)}</p>
+<p class="kv">{crew_str}</p>
+"""
+
+
+def render_launches(launches: list[dict]) -> str:
+    if not launches:
+        return '<p class="empty">No upcoming launches.</p>'
+    items = []
+    for l in launches:
+        name = html.escape(l.get("name", ""))
+        when = html.escape(l.get("when", ""))
+        status = l.get("status", "")
+        status_html = f' <span class="muted">({html.escape(status)})</span>' if status and status != "Go for Launch" else ""
+        items.append(f'<li><strong>{when}</strong> — {name}{status_html}</li>')
+    return f"<ul>{''.join(items)}</ul>"
+
+
+def render_asteroids(asteroids: list[dict]) -> str:
+    if not asteroids:
+        return '<p class="empty">No close passes today.</p>'
+    items = []
+    for a in asteroids:
+        name = html.escape(a.get("name", "?"))
+        miss = a.get("miss_lunar")
+        diam = a.get("diameter_m")
+        url = html.escape(a.get("url", "#"))
+        miss_str = f"{miss:.2f} LD" if miss is not None else "?"
+        diam_str = f"~{diam:.0f}m" if diam else "size unknown"
+        haz = ' <span class="haz">⚠ PHA</span>' if a.get("hazardous") else ""
+        items.append(
+            f'<li><a href="{url}" target="_blank" rel="noopener">'
+            f'<strong>{name}</strong></a> · {diam_str} · {miss_str}{haz}</li>'
+        )
+    return f'<ul>{"".join(items)}</ul><p class="muted" style="font-size:11px;margin-top:6px">LD = lunar distance (~384,400 km). Earth&rsquo;s atmosphere ends at ~0.0003 LD.</p>'
+
+
 def build_html(*, weather, air, sun, tides, space_wx,
                indexes, tickers, crypto,
-               local, global_, gdelt, relief, hn, reddit) -> str:
+               local, global_, gdelt, hn,
+               apod, space_news, iss, launches, asteroids) -> str:
     now_local = datetime.now(TZ)
     now_utc = datetime.now(timezone.utc)
     timestamp = now_local.strftime("%A, %B %-d, %Y — %-I:%M %p %Z")
     iso_built = now_utc.isoformat(timespec="seconds")
+
+    # Build optional sub-blocks first (cleaner than inlining in the f-string)
+    apod_block = render_apod(apod)
+    iss_block = render_iss(iss)
+    launches_block = render_launches(launches)
+    asteroids_block = render_asteroids(asteroids)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -617,8 +808,8 @@ a:hover {{ text-decoration: underline; }}
 .tag {{ display: inline-block; padding: 2px 8px; border-radius: 4px;
        font-size: 11px; margin-right: 6px; }}
 .tag-gdelt   {{ background: #1f3a5f; color: #79c0ff; }}
-.tag-relief  {{ background: #2d4f2d; color: #7ee787; }}
 .tag-space   {{ background: #4a2d5f; color: #d2a8ff; }}
+.tag-spx     {{ background: #2d1f5f; color: #b8a8ff; }}
 .tag-wx      {{ background: #5a3a1a; color: #ffd28a; }}
 .tag-aqi     {{ background: #2d4f4f; color: #7eccd8; }}
 .tag-sun     {{ background: #5a4a1a; color: #ffe28a; }}
@@ -626,7 +817,16 @@ a:hover {{ text-decoration: underline; }}
 .tag-mkt     {{ background: #3a5a1a; color: #b4ff8a; }}
 .tag-crypto  {{ background: #5a1a3a; color: #ff8ac4; }}
 .tag-hn      {{ background: #5a3a1a; color: #ff9e3a; }}
-.tag-reddit  {{ background: #5a1a1a; color: #ff8a8a; }}
+.tag-iss     {{ background: #1a4a4a; color: #8ae8e8; }}
+.tag-launch  {{ background: #4a1a1a; color: #ff9e9e; }}
+.tag-rock    {{ background: #3a3a1a; color: #d8d88a; }}
+.apod-img {{ width: 100%; max-height: 480px; object-fit: cover;
+            border-radius: 8px; display: block; }}
+.apod-cap {{ font-size: 14px; margin: 8px 0 4px 0; }}
+.apod-text {{ font-size: 13px; color: var(--text); margin: 4px 0;
+              line-height: 1.5; }}
+.haz {{ background: #5a1a1a; color: #ff9e9e; padding: 1px 5px;
+        border-radius: 3px; font-size: 11px; }}
 .quotes {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
 .quotes td {{ padding: 6px 8px; border-bottom: 1px solid var(--border); }}
 .quotes tr:last-child td {{ border-bottom: 0; }}
@@ -699,21 +899,30 @@ a:hover {{ text-decoration: underline; }}
 
   <h2><span class="tag tag-gdelt">GDELT</span> Global Events — past 24h</h2>
   {render_articles(gdelt)}
-
-  <h2><span class="tag tag-relief">ReliefWeb</span> Humanitarian Reports</h2>
-  {render_articles(relief)}
 </div>
 
-<!-- Tech / community -->
-<div class="row two">
-  <div class="card">
-    <h2><span class="tag tag-hn">HN</span> Hacker News — Top</h2>
-    {render_articles(hn)}
-  </div>
-  <div class="card">
-    <h2><span class="tag tag-reddit">Reddit</span> r/worldnews — Top 24h</h2>
-    {render_articles(reddit)}
-  </div>
+<!-- 🚀 SPACE CARD -->
+<div class="card">
+  <h2><span class="tag tag-space">APOD</span> NASA Picture of the Day</h2>
+  {apod_block}
+
+  <h2><span class="tag tag-spx">NEWS</span> Spaceflight Headlines</h2>
+  {render_articles(space_news)}
+
+  <h2><span class="tag tag-iss">ISS</span> International Space Station</h2>
+  {iss_block}
+
+  <h2><span class="tag tag-launch">LAUNCH</span> Upcoming Launches</h2>
+  {launches_block}
+
+  <h2><span class="tag tag-rock">NEO</span> Today&rsquo;s Asteroid Close Passes</h2>
+  {asteroids_block}
+</div>
+
+<!-- Tech -->
+<div class="card">
+  <h2><span class="tag tag-hn">HN</span> Hacker News — Top</h2>
+  {render_articles(hn)}
 </div>
 
 <!-- News -->
@@ -727,8 +936,9 @@ a:hover {{ text-decoration: underline; }}
 
 <div class="footer">
   Generated {iso_built} UTC by GitHub Actions ·
-  Sources: RSS, GDELT 2.0, ReliefWeb, HN, Reddit, Yahoo Finance, CoinGecko,
-  NOAA SWPC, NOAA Tides, Open-Meteo, Sunrise-Sunset.org ·
+  Sources: RSS · GDELT 2.0 · HN · Yahoo Finance · CoinGecko ·
+  NOAA SWPC · NOAA Tides · Open-Meteo · Sunrise-Sunset · NASA APOD/NeoWs ·
+  Spaceflight News · The Space Devs · Open Notify ·
   Auto-refreshes hourly
 </div>
 
@@ -756,15 +966,8 @@ def main() -> int:
     log.info("GDELT...")
     gdelt = fetch_gdelt()
 
-    time.sleep(1)
-    log.info("ReliefWeb...")
-    relief = fetch_reliefweb()
-
     log.info("Hacker News...")
     hn = fetch_hackernews()
-
-    log.info("Reddit r/worldnews...")
-    reddit_news = fetch_reddit_worldnews()
 
     log.info("Stocks...")
     indexes, tickers = fetch_stocks()
@@ -787,18 +990,37 @@ def main() -> int:
     log.info("Tides...")
     tides = fetch_tides()
 
+    log.info("APOD...")
+    apod = fetch_apod()
+
+    log.info("Spaceflight News...")
+    space_news = fetch_spaceflight_news()
+
+    log.info("ISS...")
+    iss = fetch_iss()
+
+    log.info("Upcoming launches...")
+    launches = fetch_launches()
+
+    log.info("Near-Earth asteroids...")
+    asteroids = fetch_asteroids()
+
     log.info(
-        "Counts — local:%d global:%d gdelt:%d relief:%d hn:%d reddit:%d "
-        "indexes:%d tickers:%d crypto:%d tides:%d",
-        len(local), len(global_), len(gdelt), len(relief), len(hn), len(reddit_news),
+        "Counts — local:%d global:%d gdelt:%d hn:%d "
+        "indexes:%d tickers:%d crypto:%d tides:%d "
+        "apod:%s spx_news:%d launches:%d asteroids:%d iss_crew:%s",
+        len(local), len(global_), len(gdelt), len(hn),
         len(indexes), len(tickers), len(crypto), len(tides),
+        "yes" if apod else "no", len(space_news), len(launches), len(asteroids),
+        iss.get("crew_count"),
     )
 
     html_doc = build_html(
         weather=weather, air=air, sun=sun, tides=tides, space_wx=space_wx,
         indexes=indexes, tickers=tickers, crypto=crypto,
-        local=local, global_=global_, gdelt=gdelt, relief=relief,
-        hn=hn, reddit=reddit_news,
+        local=local, global_=global_, gdelt=gdelt, hn=hn,
+        apod=apod, space_news=space_news, iss=iss,
+        launches=launches, asteroids=asteroids,
     )
 
     with open("index.html", "w", encoding="utf-8") as f:
