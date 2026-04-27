@@ -232,10 +232,16 @@ def fetch_hackernews() -> list[Article]:
 
 
 def fetch_reddit_worldnews() -> list[Article]:
-    """r/worldnews top from past 24h."""
+    """r/worldnews top from past 24h.
+    Reddit requires a specific UA format: 'platform:appname:version (by /u/user)'.
+    Generic UAs get 403'd.
+    """
     url = "https://www.reddit.com/r/worldnews/top.json?t=day&limit=10"
+    reddit_ua = "web:daily-briefing:v2.0 (github actions, personal use)"
     try:
-        data = _get_json(url, timeout=15, headers={"User-Agent": USER_AGENT})
+        r = requests.get(url, timeout=15, headers={"User-Agent": reddit_ua})
+        r.raise_for_status()
+        data = r.json()
         out: list[Article] = []
         for child in data.get("data", {}).get("children", []):
             d = child.get("data", {})
@@ -258,50 +264,45 @@ def fetch_reddit_worldnews() -> list[Article]:
 # --- MARKETS --------------------------------------------------------------
 
 def fetch_yahoo_quotes(symbols: list[str]) -> dict[str, Quote]:
-    """Yahoo Finance v8 quote API — free, no key. One request, all symbols."""
-    if not symbols:
-        return {}
-    syms = ",".join(symbols)
-    url = f"https://query1.finance.yahoo.com/v8/finance/spark?symbols={syms}&interval=1d&range=2d"
-    # We use spark for resilience; quote endpoint can be flaky from cloud IPs.
-    # Fall back to "quote" endpoint if spark fails.
+    """Yahoo Finance v8 chart API — works from cloud IPs (unlike v7 quote).
+    One request per symbol, but they're parallel-friendly and return fast.
+    """
     out: dict[str, Quote] = {}
-    try:
-        # Primary: quote endpoint (more accurate intraday)
-        quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={syms}"
-        data = _get_json(quote_url, timeout=20)
-        for q in data.get("quoteResponse", {}).get("result", []):
-            sym = q.get("symbol")
-            if not sym:
-                continue
-            out[sym] = Quote(
-                name=q.get("shortName") or q.get("longName") or sym,
-                symbol=sym,
-                price=q.get("regularMarketPrice"),
-                change=q.get("regularMarketChange"),
-                change_pct=q.get("regularMarketChangePercent"),
-            )
-        if out:
-            return out
-    except Exception as e:
-        log.warning("Yahoo quote endpoint failed (%s); trying spark fallback", e)
+    if not symbols:
+        return out
 
-    # Fallback: spark endpoint computes change from last 2 days
-    try:
-        data = _get_json(url, timeout=20)
-        for sym, payload in data.get("spark", {}).get("result", {}).items() if isinstance(
-            data.get("spark", {}).get("result"), dict
-        ) else [(r["symbol"], r) for r in data.get("spark", {}).get("result", []) if "symbol" in r]:
-            closes = payload.get("response", [{}])[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-            closes = [c for c in closes if c is not None]
-            if len(closes) >= 2:
-                price = closes[-1]
-                prev = closes[0]
-                change = price - prev
-                pct = (change / prev * 100) if prev else None
-                out[sym] = Quote(name=sym, symbol=sym, price=price, change=change, change_pct=pct)
-    except Exception as e:
-        log.warning("Yahoo spark fallback failed: %s", e)
+    # Use a browser-style UA — Yahoo treats library-default UAs more strictly.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
+    for sym in symbols:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d"
+            r = requests.get(url, timeout=15, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                continue
+            meta = result[0].get("meta", {})
+            price = meta.get("regularMarketPrice")
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+            if price is None or prev is None:
+                continue
+            change = price - prev
+            pct = (change / prev * 100) if prev else None
+            name = meta.get("longName") or meta.get("shortName") or sym
+            out[sym] = Quote(
+                name=name, symbol=sym,
+                price=price, change=change, change_pct=pct,
+            )
+        except Exception as e:
+            log.warning("Yahoo failed for %s: %s", sym, e)
+            continue
 
     return out
 
@@ -354,16 +355,26 @@ def fetch_crypto() -> list[Quote]:
 # --- ENVIRONMENT ----------------------------------------------------------
 
 def fetch_space_weather() -> str:
+    """NOAA Kp index. As of late 2025 the format is a JSON array of dicts:
+       [{"time_tag": "...", "Kp": 3.33, "a_running": 18, "station_count": 8}, ...]
+    """
     try:
         kp = _get_json(
             "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
             timeout=15,
         )
-        # First row is headers; skip it
-        rows = [r for r in kp[1:] if r and len(r) >= 2]
-        latest = rows[-1]
-        kp_val = float(latest[1])
-        kp_time = latest[0]
+        if not kp or not isinstance(kp, list):
+            return "Unavailable"
+        latest = kp[-1]
+        # Handle both legacy (array of arrays) and current (array of dicts) formats
+        if isinstance(latest, dict):
+            kp_val = float(latest.get("Kp", 0))
+            kp_time = latest.get("time_tag", "")
+        else:
+            # Legacy fallback
+            kp_val = float(latest[1])
+            kp_time = latest[0]
+
         if kp_val >= 7:
             status = "G3+ severe geomagnetic storm"
         elif kp_val >= 5:
