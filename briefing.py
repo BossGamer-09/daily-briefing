@@ -67,6 +67,12 @@ MAX_PER_FEED = 4
 USER_AGENT = "DailyBriefing/2.0 (github-actions; personal-use)"
 SENTINEL_URL = "https://sentinel.axonia.us/"
 
+# Stocks via Cloudflare Worker (proxies Yahoo Finance with CORS).
+# Set this to your deployed Worker URL after one-time setup.
+# Format: https://daily-briefing-stocks.YOURUSER.workers.dev
+# Leave as-is to disable browser-side stock updates (server still works).
+STOCK_WORKER_URL = "https://2f8ddc59.daily-briefing-stocks.pages.dev"
+
 # Stocks — Yahoo Finance symbols. Indexes use ^ prefix.
 STOCK_INDEXES = [
     ("S&P 500", "^GSPC"),
@@ -625,7 +631,10 @@ def render_articles(arts: list[Article]) -> str:
     return f"<ul>{''.join(lis)}</ul>"
 
 
-def render_quotes(quotes: list[Quote], price_fmt: str = "${:,.2f}") -> str:
+def render_quotes(quotes: list[Quote], price_fmt: str = "${:,.2f}",
+                  kind: str = "stock") -> str:
+    """kind: 'stock' or 'crypto' — controls which data-attr we emit so JS can
+    target the right rows."""
     if not quotes:
         return '<p class="empty">No data.</p>'
     rows = []
@@ -636,8 +645,18 @@ def render_quotes(quotes: list[Quote], price_fmt: str = "${:,.2f}") -> str:
         arrow = "▲" if (q.change_pct or 0) >= 0 else "▼"
         pct = f"{q.change_pct:+.2f}%" if q.change_pct is not None else "—"
         price = price_fmt.format(q.price)
+        # data-* attributes let the live-updater find this row and refresh it
+        if kind == "crypto":
+            data_attr = f'data-coin-id="{html.escape(q.symbol.lower())}"'
+            # Crypto symbols are uppercased coin tickers; we'll match by symbol below
+            # Actually: for crypto we want the coingecko id, which is in the original config.
+            # The symbol shown is e.g. "BTC", but coingecko id is "bitcoin".
+            # Simpler: emit data-symbol and look it up client-side via a map we inject.
+            data_attr = f'data-crypto-sym="{html.escape(q.symbol)}"'
+        else:
+            data_attr = f'data-stock-sym="{html.escape(q.symbol)}"'
         rows.append(
-            f'<tr>'
+            f'<tr {data_attr}>'
             f'<td class="qname"><strong>{html.escape(q.name)}</strong> '
             f'<span class="qsym">{html.escape(q.symbol)}</span></td>'
             f'<td class="qprice">{price}</td>'
@@ -706,7 +725,7 @@ def render_iss(iss: dict) -> str:
         if crew_count else "<em>Crew info unavailable</em>"
     )
     return f"""
-<p class="kv"><strong>Currently over:</strong> {html.escape(loc)}</p>
+<p class="kv" data-iss-location><strong>Currently over:</strong> <span data-iss-place>{html.escape(loc)}</span></p>
 <p class="kv">{crew_str}</p>
 """
 
@@ -747,10 +766,20 @@ def build_html(*, weather, air, sun, tides, space_wx,
                indexes, tickers, crypto,
                local, global_, gdelt, hn,
                apod, space_news, iss, launches, asteroids) -> str:
+    import json as _json
     now_local = datetime.now(TZ)
     now_utc = datetime.now(timezone.utc)
     timestamp = now_local.strftime("%A, %B %-d, %Y — %-I:%M %p %Z")
     iso_built = now_utc.isoformat(timespec="seconds")
+
+    # Config that gets inlined into the live-update <script> block.
+    # All values are JSON-encoded so we can embed them directly into JS.
+    stock_worker_json = _json.dumps(STOCK_WORKER_URL)
+    all_stock_syms = [s for _, s in STOCK_INDEXES] + [s for _, s in STOCK_TICKERS]
+    stock_symbols_json = _json.dumps(all_stock_syms)
+    # Map of display symbol → coingecko id (e.g. "BTC" → "bitcoin")
+    crypto_map_json = _json.dumps({sym: coin_id for _, coin_id, sym in CRYPTO_COINS})
+    location_name_json = _json.dumps(LOCATION_NAME)
 
     # Build optional sub-blocks first (cleaner than inlining in the f-string)
     apod_block = render_apod(apod)
@@ -827,6 +856,17 @@ a:hover {{ text-decoration: underline; }}
               line-height: 1.5; }}
 .haz {{ background: #5a1a1a; color: #ff9e9e; padding: 1px 5px;
         border-radius: 3px; font-size: 11px; }}
+.live-indicator {{
+  display: inline-block; margin-left: 8px; padding: 1px 8px;
+  border-radius: 10px; font-size: 11px; font-weight: 500;
+  background: #1a1a1a; color: var(--muted);
+  transition: all 0.3s;
+}}
+.live-indicator.on    {{ background: #0d2818; color: #3fb950; }}
+.live-indicator.off   {{ background: #281818; color: #f85149; }}
+.live-indicator.idle  {{ background: #1a1a1a; color: #8b949e; }}
+.qprice, .qchg {{ transition: background 0.6s ease-out; }}
+.qprice.flash, .qchg.flash {{ background: rgba(88, 166, 255, 0.25); }}
 .quotes {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
 .quotes td {{ padding: 6px 8px; border-bottom: 1px solid var(--border); }}
 .quotes tr:last-child td {{ border-bottom: 0; }}
@@ -853,13 +893,13 @@ a:hover {{ text-decoration: underline; }}
 
 <header>
   <h1><span class="accent">☕</span> Daily Briefing</h1>
-  <div class="muted">{timestamp} · {LOCATION_NAME}</div>
+  <div class="muted">{timestamp} · {LOCATION_NAME} <span id="live-indicator" class="live-indicator off">⚪ initializing</span></div>
 </header>
 
 <!-- Top row: at-a-glance environment -->
 <div class="card">
   <h2><span class="tag tag-wx">WEATHER</span> {LOCATION_NAME}</h2>
-  <p class="kv">{html.escape(weather)}</p>
+  <p class="kv" data-weather>{html.escape(weather)}</p>
 
   <h2><span class="tag tag-aqi">AIR QUALITY</span></h2>
   <p class="kv">{html.escape(air)}</p>
@@ -878,14 +918,14 @@ a:hover {{ text-decoration: underline; }}
 <div class="row two">
   <div class="card">
     <h2><span class="tag tag-mkt">STOCKS</span> Indexes</h2>
-    {render_quotes(indexes, "{:,.2f}")}
+    {render_quotes(indexes, "{:,.2f}", kind="stock")}
     <h2><span class="tag tag-mkt">STOCKS</span> Watchlist</h2>
-    {render_quotes(tickers, "${:,.2f}")}
+    {render_quotes(tickers, "${:,.2f}", kind="stock")}
   </div>
 
   <div class="card">
     <h2><span class="tag tag-crypto">CRYPTO</span> Top coins</h2>
-    {render_quotes(crypto, "${:,.2f}")}
+    {render_quotes(crypto, "${:,.2f}", kind="crypto")}
   </div>
 </div>
 
@@ -939,10 +979,292 @@ a:hover {{ text-decoration: underline; }}
   Sources: RSS · GDELT 2.0 · HN · Yahoo Finance · CoinGecko ·
   NOAA SWPC · NOAA Tides · Open-Meteo · Sunrise-Sunset · NASA APOD/NeoWs ·
   Spaceflight News · The Space Devs · Open Notify ·
-  Auto-refreshes hourly
+  Live updates via Cloudflare Worker
 </div>
 
 </div>
+
+<script>
+// === LIVE UPDATER ===========================================================
+// Refreshes stocks/crypto/weather/ISS in-place without a page reload.
+// Pauses when tab is hidden. Backs off on errors.
+// All config below is inlined from briefing.py at build time.
+
+const CONFIG = {{
+  stockWorkerUrl: {stock_worker_json},
+  stockSymbols: {stock_symbols_json},
+  cryptoMap: {crypto_map_json},
+  weather: {{
+    lat: {LAT},
+    lon: {LON},
+    locationName: {location_name_json}
+  }},
+  intervals: {{
+    stock: 2 * 60 * 1000,
+    crypto: 2 * 60 * 1000,
+    weather: 10 * 60 * 1000,
+    iss: 30 * 1000
+  }}
+}};
+
+const STATE = {{
+  errorCounts: {{ stock: 0, crypto: 0, weather: 0, iss: 0 }},
+  lastSuccess: {{ stock: 0, crypto: 0, weather: 0, iss: 0 }},
+  visible: !document.hidden
+}};
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+function setIndicator(state, msg) {{
+  const el = $('#live-indicator');
+  if (!el) return;
+  el.className = 'live-indicator ' + state;
+  const dot = state === 'on' ? '🟢' : state === 'off' ? '🔴' : '⚪';
+  el.textContent = dot + ' ' + msg;
+}}
+
+function flash(el) {{
+  if (!el) return;
+  el.classList.remove('flash');
+  void el.offsetWidth; // restart animation
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 600);
+}}
+
+function fmtPrice(n, withDollar = true) {{
+  if (n == null) return '—';
+  const opts = {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }};
+  if (n >= 1000) opts.maximumFractionDigits = 0;
+  return (withDollar ? '$' : '') + n.toLocaleString('en-US', opts);
+}}
+
+function fmtPct(p) {{
+  if (p == null || isNaN(p)) return '—';
+  return (p >= 0 ? '+' : '') + p.toFixed(2) + '%';
+}}
+
+function updateRow(row, price, changePct, withDollar = true) {{
+  if (!row || price == null) return;
+  const priceEl = row.querySelector('.qprice');
+  const chgEl = row.querySelector('.qchg');
+  if (!priceEl || !chgEl) return;
+
+  const oldPrice = priceEl.textContent.replace(/[^0-9.\\-]/g, '');
+  const newPriceText = fmtPrice(price, withDollar);
+  if (oldPrice !== '' && parseFloat(oldPrice).toFixed(2) !== price.toFixed(2)) {{
+    flash(priceEl);
+  }}
+  priceEl.textContent = newPriceText;
+
+  const arrow = (changePct ?? 0) >= 0 ? '▲' : '▼';
+  chgEl.className = 'qchg ' + ((changePct ?? 0) >= 0 ? 'up' : 'down');
+  chgEl.textContent = arrow + ' ' + fmtPct(changePct);
+}}
+
+// --- Stocks (via Cloudflare Worker) -----------------------------------------
+async function refreshStocks() {{
+  if (!CONFIG.stockWorkerUrl || !CONFIG.stockSymbols.length) return;
+  if (!isMarketOpenOrRecent() && Date.now() - STATE.lastSuccess.stock < 30 * 60 * 1000) {{
+    return; // markets closed, last update <30 min ago — skip
+  }}
+  try {{
+    const url = CONFIG.stockWorkerUrl + '/quote?symbols=' +
+      encodeURIComponent(CONFIG.stockSymbols.join(','));
+    const r = await fetch(url, {{ cache: 'no-store' }});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    let updated = 0;
+    for (const [sym, q] of Object.entries(data)) {{
+      const row = document.querySelector(`[data-stock-sym="${{sym}}"]`);
+      if (row && q.price != null) {{
+        updateRow(row, q.price, q.change_pct, sym.startsWith('^') ? false : true);
+        updated++;
+      }}
+    }}
+    STATE.errorCounts.stock = 0;
+    STATE.lastSuccess.stock = Date.now();
+    console.log(`[stocks] updated ${{updated}} symbols`);
+  }} catch (e) {{
+    STATE.errorCounts.stock++;
+    console.warn('[stocks] failed:', e.message);
+  }}
+}}
+
+// --- Crypto (CoinGecko, CORS-friendly) --------------------------------------
+async function refreshCrypto() {{
+  const ids = Object.values(CONFIG.cryptoMap).join(',');
+  if (!ids) return;
+  try {{
+    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${{ids}}&vs_currencies=usd&include_24hr_change=true`;
+    const r = await fetch(url, {{ cache: 'no-store' }});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    let updated = 0;
+    for (const [sym, coinId] of Object.entries(CONFIG.cryptoMap)) {{
+      const d = data[coinId];
+      if (!d) continue;
+      const row = document.querySelector(`[data-crypto-sym="${{sym}}"]`);
+      if (row) {{
+        updateRow(row, d.usd, d.usd_24h_change, true);
+        updated++;
+      }}
+    }}
+    STATE.errorCounts.crypto = 0;
+    STATE.lastSuccess.crypto = Date.now();
+    console.log(`[crypto] updated ${{updated}} coins`);
+  }} catch (e) {{
+    STATE.errorCounts.crypto++;
+    console.warn('[crypto] failed:', e.message);
+  }}
+}}
+
+// --- Weather (Open-Meteo, CORS-friendly) ------------------------------------
+async function refreshWeather() {{
+  try {{
+    const u = `https://api.open-meteo.com/v1/forecast?latitude=${{CONFIG.weather.lat}}&longitude=${{CONFIG.weather.lon}}&current=temperature_2m,relative_humidity_2m,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=2`;
+    const r = await fetch(u, {{ cache: 'no-store' }});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const w = await r.json();
+    const c = w.current, d = w.daily;
+    const txt = `Now: ${{c.temperature_2m}}°F · humidity ${{c.relative_humidity_2m}}% · wind ${{c.wind_speed_10m}} mph. Today: high ${{d.temperature_2m_max[0]}}°F / low ${{d.temperature_2m_min[0]}}°F · precip ${{d.precipitation_probability_max[0]}}%.`;
+    const el = $('[data-weather]');
+    if (el && el.textContent !== txt) {{
+      el.textContent = txt;
+      flash(el);
+    }}
+    STATE.errorCounts.weather = 0;
+    STATE.lastSuccess.weather = Date.now();
+  }} catch (e) {{
+    STATE.errorCounts.weather++;
+    console.warn('[weather] failed:', e.message);
+  }}
+}}
+
+// --- ISS (CORS proxy + reverse geocoding) -----------------------------------
+// open-notify is HTTP-only, so we use wheretheiss.at which is HTTPS + CORS.
+async function refreshIss() {{
+  try {{
+    const r = await fetch('https://api.wheretheiss.at/v1/satellites/25544', {{ cache: 'no-store' }});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const lat = d.latitude;
+    const lon = d.longitude;
+    // Reverse geocode (CORS-friendly)
+    let place = `${{lat.toFixed(1)}}°, ${{lon.toFixed(1)}}°`;
+    try {{
+      const g = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${{lat}}&longitude=${{lon}}&localityLanguage=en`,
+        {{ cache: 'no-store' }}
+      );
+      if (g.ok) {{
+        const geo = await g.json();
+        const country = geo.countryName;
+        const locality = geo.locality;
+        const where = country
+          ? (locality ? `${{locality}}, ${{country}}` : country)
+          : (locality || 'open ocean');
+        place = `${{where}} (${{lat.toFixed(1)}}°, ${{lon.toFixed(1)}}°)`;
+      }}
+    }} catch (e) {{ /* fall through to bare coords */ }}
+
+    const el = $('[data-iss-place]');
+    if (el && el.textContent !== place) {{
+      el.textContent = place;
+      flash(el.parentElement);
+    }}
+    STATE.errorCounts.iss = 0;
+    STATE.lastSuccess.iss = Date.now();
+  }} catch (e) {{
+    STATE.errorCounts.iss++;
+    console.warn('[iss] failed:', e.message);
+  }}
+}}
+
+// --- Helpers ---------------------------------------------------------------
+
+function isMarketOpenOrRecent() {{
+  // US equity hours: M-F 9:30am-4pm ET. Approximate without DST headaches:
+  // ET is UTC-5 (EST) or UTC-4 (EDT). We accept a generous 14:00-21:00 UTC window
+  // M-F. Outside that, "stale-ok" mode kicks in.
+  const now = new Date();
+  const day = now.getUTCDay();      // 0=Sun, 6=Sat
+  const hour = now.getUTCHours();
+  if (day === 0 || day === 6) return false;
+  return hour >= 13 && hour < 22;
+}}
+
+function backoffMs(base, errors) {{
+  // Double interval per consecutive failure, capped at 1 hour
+  return Math.min(base * Math.pow(2, errors), 60 * 60 * 1000);
+}}
+
+function scheduleAll() {{
+  // Initial fetch right away
+  refreshStocks();
+  refreshCrypto();
+  refreshWeather();
+  refreshIss();
+
+  // Recurring polls — recompute interval each tick to honor backoff
+  function loop(name, fn) {{
+    const tick = async () => {{
+      if (STATE.visible) {{
+        await fn();
+        updateIndicator();
+      }}
+      const interval = backoffMs(CONFIG.intervals[name], STATE.errorCounts[name]);
+      setTimeout(tick, interval);
+    }};
+    setTimeout(tick, CONFIG.intervals[name]);
+  }}
+
+  loop('stock', refreshStocks);
+  loop('crypto', refreshCrypto);
+  loop('weather', refreshWeather);
+  loop('iss', refreshIss);
+}}
+
+function updateIndicator() {{
+  const totalErrors = Object.values(STATE.errorCounts).reduce((a, b) => a + b, 0);
+  const lastUpdate = Math.max(...Object.values(STATE.lastSuccess));
+  if (lastUpdate === 0) {{
+    setIndicator('off', 'no data yet');
+  }} else if (totalErrors >= 3) {{
+    setIndicator('off', 'connection issues');
+  }} else if (!STATE.visible) {{
+    setIndicator('idle', 'paused (tab inactive)');
+  }} else {{
+    const ageSec = Math.floor((Date.now() - lastUpdate) / 1000);
+    const ageStr = ageSec < 60 ? `${{ageSec}}s ago`
+                  : ageSec < 3600 ? `${{Math.floor(ageSec/60)}}m ago`
+                  : `${{Math.floor(ageSec/3600)}}h ago`;
+    setIndicator('on', `live · last update ${{ageStr}}`);
+  }}
+}}
+
+// Pause polling when tab hidden, resume on return
+document.addEventListener('visibilitychange', () => {{
+  STATE.visible = !document.hidden;
+  updateIndicator();
+  if (STATE.visible) {{
+    // Refresh everything immediately on return
+    refreshStocks();
+    refreshCrypto();
+    refreshWeather();
+    refreshIss();
+  }}
+}});
+
+// Update the "last X seconds ago" indicator every second
+setInterval(updateIndicator, 1000);
+
+// Boot
+scheduleAll();
+console.log('[live] updater started', CONFIG);
+
+</script>
+
 </body>
 </html>
 """
