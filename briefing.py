@@ -188,7 +188,7 @@ def fetch_gdelt() -> list[Article]:
 
 def fetch_reliefweb() -> list[Article]:
     params = {
-        "appname": "github-pages-daily-briefing-r1200",
+        "appname": "daily-briefing@drawmyoshi.com",
         "profile": "list",
         "preset": "latest",
         "limit": "8",
