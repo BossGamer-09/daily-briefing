@@ -71,7 +71,7 @@ SENTINEL_URL = "https://sentinel.axonia.us/"
 # Set this to your deployed Worker URL after one-time setup.
 # Format: https://daily-briefing-stocks.YOURUSER.workers.dev
 # Leave as-is to disable browser-side stock updates (server still works).
-STOCK_WORKER_URL = "https://2f8ddc59.daily-briefing-stocks.pages.dev"
+STOCK_WORKER_URL = "https://daily-briefing-stocks.mwilmot.workers.dev"
 
 # Stocks — Yahoo Finance symbols. Indexes use ^ prefix.
 STOCK_INDEXES = [
