@@ -1,0 +1,53 @@
+name: Daily Briefing
+
+on:
+  # 7:00 AM Pacific = 14:00 UTC (PDT) / 15:00 UTC (PST)
+  # 7:00 PM Pacific = 02:00 UTC next day (PDT) / 03:00 UTC (PST)
+  # Cron uses UTC; we use PDT timing year-round (close enough — GitHub also delays
+  # cron jobs up to ~15 min during peak hours anyway).
+  schedule:
+    - cron: '0 14 * * *'   # ~7 AM Pacific
+    - cron: '0 2 * * *'    # ~7 PM Pacific
+  # Manual trigger button in the Actions tab
+  workflow_dispatch:
+  # Also run when you push changes to main (handy for testing)
+  push:
+    branches: [main]
+
+# Required for GitHub Pages deployment via the new Pages action
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment at a time; cancel in-progress if a new one starts
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate briefing
+        run: python briefing.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

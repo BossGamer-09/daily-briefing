@@ -1,0 +1,14 @@
+# Locally generated; the workflow builds it fresh on GitHub
+index.html
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
